@@ -1,5 +1,42 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-          package="com.wscodelabs.callLogs">
+    package="com.wscodelabs.callLogs">
 
+    <!-- ✅ Required permissions -->
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+
+        <!-- ✅ Register your BroadcastReceiver -->
+        <receiver android:name=".callLogs.CallReceiver">
+            <intent-filter>
+                <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ✅ Register your Headless JS Task Service -->
+        <service
+            android:name=".callLogs.CallLogHeadlessTaskService"
+            android:exported="false" />
+
+        <!-- ✅ Your existing MainActivity stays as is -->
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|uiMode"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
 </manifest>
