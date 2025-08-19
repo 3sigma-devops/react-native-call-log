@@ -1,11 +1,11 @@
-package com.yourpackage.callLogs;
+package com.wscodelabs.callLogs;
 
 import android.content.Intent;
 import android.os.Bundle;
 
 import androidx.annotation.Nullable;
 
-import com.facebook.react.HeadlessJsTaskConfig;
+import com.facebook.react.jstasks.HeadlessJsTaskConfig;
 import com.facebook.react.HeadlessJsTaskService;
 import com.facebook.react.bridge.Arguments;
 

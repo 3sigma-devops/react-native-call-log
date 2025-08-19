@@ -1,4 +1,4 @@
-package com.yourpackage.callLogs;
+package com.wscodelabs.callLogs;
 
 import android.Manifest;
 import android.content.pm.PackageManager;
