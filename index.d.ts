@@ -25,6 +25,7 @@ declare namespace CallLogs {
     dateTime: string;
     type: CallType;
     rawType: number;
+    phoneAccountId?: string;
   }
 
   const load: (limit: number, filter?: CallFilter) => Promise<CallLog[]>;

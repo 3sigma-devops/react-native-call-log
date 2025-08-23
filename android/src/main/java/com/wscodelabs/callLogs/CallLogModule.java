@@ -4,6 +4,7 @@ import android.provider.CallLog;
 import android.provider.CallLog.Calls;
 import android.database.Cursor;
 import android.content.Context;
+import android.os.Build;
 
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
@@ -82,6 +83,8 @@ public class CallLogModule extends ReactContextBaseJavaModule {
             final int DATE_COLUMN_INDEX = cursor.getColumnIndex(Calls.DATE);
             final int DURATION_COLUMN_INDEX = cursor.getColumnIndex(Calls.DURATION);
             final int NAME_COLUMN_INDEX = cursor.getColumnIndex(Calls.CACHED_NAME);
+            final int PHONE_ACCOUNT_ID_COLUMN_INDEX = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP 
+                ? cursor.getColumnIndex(Calls.PHONE_ACCOUNT_ID) : -1;
 
             boolean minTimestampDefined = minTimestamp != null && !minTimestamp.equals("0");
             boolean minTimestampReached = false;
@@ -90,6 +93,8 @@ public class CallLogModule extends ReactContextBaseJavaModule {
                 String phoneNumber = cursor.getString(NUMBER_COLUMN_INDEX);
                 int duration = cursor.getInt(DURATION_COLUMN_INDEX);
                 String name = cursor.getString(NAME_COLUMN_INDEX);
+                String phoneAccountId = (PHONE_ACCOUNT_ID_COLUMN_INDEX != -1) 
+                    ? cursor.getString(PHONE_ACCOUNT_ID_COLUMN_INDEX) : null;
 
                 String timestampStr = cursor.getString(DATE_COLUMN_INDEX);
                 minTimestampReached = minTimestampDefined && Long.parseLong(timestampStr) <= Long.parseLong(minTimestamp);
@@ -115,6 +120,11 @@ public class CallLogModule extends ReactContextBaseJavaModule {
                     callLog.putString("dateTime", dateTime);
                     callLog.putString("type", type);
                     callLog.putInt("rawType", cursor.getInt(TYPE_COLUMN_INDEX));
+                    if (phoneAccountId != null) {
+                        callLog.putString("phoneAccountId", phoneAccountId);
+                    } else {
+                        callLog.putNull("phoneAccountId");
+                    }
                     result.pushMap(callLog);
                     callLogCount++;
                 }
