@@ -1,5 +1,5 @@
 declare namespace CallLogs {
-  export enum callType {
+  export enum CallType {
     OUTGOING = 'OUTGOING',
     INCOMING = 'INCOMING',
     MISSED = 'MISSED',
@@ -26,11 +26,14 @@ declare namespace CallLogs {
     type: CallType;
     rawType: number;
     phoneAccountId?: string;
+    simSlot?: number;
   }
 
   const load: (limit: number, filter?: CallFilter) => Promise<CallLog[]>;
 
   const loadAll: () => Promise<CallLog[]>;
+
+  const isAvailable: () => boolean;
 }
 
 export = CallLogs;

@@ -1,17 +1,22 @@
 package com.wscodelabs.callLogs;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
 import android.provider.CallLog;
 import android.provider.CallLog.Calls;
 import android.database.Cursor;
 import android.content.Context;
 import android.os.Build;
+import android.telecom.PhoneAccountHandle;
+import android.telecom.TelecomManager;
+import android.util.Log;
+import androidx.core.content.ContextCompat;
 
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Date;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.List;
 
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
@@ -29,7 +34,8 @@ import javax.annotation.Nullable;
 
 public class CallLogModule extends ReactContextBaseJavaModule {
 
-    private Context context;
+    private static final String TAG = "CallLogModule";
+    private final Context context;
 
     public CallLogModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -39,6 +45,19 @@ public class CallLogModule extends ReactContextBaseJavaModule {
     @Override
     public String getName() {
         return "CallLogs";
+    }
+
+    /**
+     * Check if READ_CALL_LOG permission is granted
+     * @return true if permission is granted
+     */
+    private boolean hasCallLogPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            return ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG)
+                == PackageManager.PERMISSION_GRANTED;
+        }
+        // Pre-Marshmallow: permission is granted at install time
+        return true;
     }
 
     @ReactMethod
@@ -53,102 +72,348 @@ public class CallLogModule extends ReactContextBaseJavaModule {
 
     @ReactMethod
     public void loadWithFilter(int limit, @Nullable ReadableMap filter, Promise promise) {
+        Cursor cursor = null;
         try {
-            Cursor cursor = this.context.getContentResolver().query(CallLog.Calls.CONTENT_URI,
-                    null, null, null, CallLog.Calls.DATE + " DESC");
+            // Check permission first
+            if (!hasCallLogPermission()) {
+                Log.e(TAG, "READ_CALL_LOG permission not granted");
+                promise.reject("PERMISSION_DENIED", "READ_CALL_LOG permission is required to access call logs");
+                return;
+            }
+
+            // Validate context
+            if (context == null || context.getContentResolver() == null) {
+                Log.e(TAG, "Context or ContentResolver is null");
+                promise.reject("INITIALIZATION_ERROR", "Module context is not properly initialized");
+                return;
+            }
+
+            // Build SQL WHERE clause for efficient filtering at database level
+            StringBuilder selection = new StringBuilder();
+            List<String> selectionArgs = new ArrayList<>();
+
+            if (filter != null) {
+                // Filter by timestamp range
+                if (filter.hasKey("minTimestamp")) {
+                    String minTimestamp = filter.getString("minTimestamp");
+                    if (minTimestamp != null && !minTimestamp.equals("0")) {
+                        if (selection.length() > 0) selection.append(" AND ");
+                        selection.append(Calls.DATE).append(" >= ?");
+                        selectionArgs.add(minTimestamp);
+                    }
+                }
+
+                if (filter.hasKey("maxTimestamp")) {
+                    String maxTimestamp = filter.getString("maxTimestamp");
+                    if (maxTimestamp != null && !maxTimestamp.equals("-1")) {
+                        if (selection.length() > 0) selection.append(" AND ");
+                        selection.append(Calls.DATE).append(" <= ?");
+                        selectionArgs.add(maxTimestamp);
+                    }
+                }
+
+                // Filter by call types
+                if (filter.hasKey("types")) {
+                    String types = filter.getString("types");
+                    if (types != null) {
+                        JSONArray typesArray = new JSONArray(types);
+                        List<String> validTypeCodes = new ArrayList<>();
+
+                        // Collect valid type codes first
+                        for (int i = 0; i < typesArray.length(); i++) {
+                            String typeStr = typesArray.optString(i);
+                            int typeCode = resolveCallTypeCode(typeStr);
+                            if (typeCode != -1) {
+                                validTypeCodes.add(String.valueOf(typeCode));
+                            }
+                        }
+
+                        // Only add to query if we have valid types
+                        if (!validTypeCodes.isEmpty()) {
+                            if (selection.length() > 0) selection.append(" AND ");
+                            selection.append(Calls.TYPE).append(" IN (");
+                            for (int i = 0; i < validTypeCodes.size(); i++) {
+                                if (i > 0) selection.append(", ");
+                                selection.append("?");
+                                selectionArgs.add(validTypeCodes.get(i));
+                            }
+                            selection.append(")");
+                        }
+                    }
+                }
+
+                // Filter by phone numbers
+                if (filter.hasKey("phoneNumbers")) {
+                    String phoneNumbers = filter.getString("phoneNumbers");
+                    if (phoneNumbers != null) {
+                        JSONArray phoneNumbersArray = new JSONArray(phoneNumbers);
+                        if (phoneNumbersArray.length() > 0) {
+                            if (selection.length() > 0) selection.append(" AND ");
+                            selection.append(Calls.NUMBER).append(" IN (");
+                            for (int i = 0; i < phoneNumbersArray.length(); i++) {
+                                if (i > 0) selection.append(", ");
+                                selection.append("?");
+                                selectionArgs.add(phoneNumbersArray.optString(i));
+                            }
+                            selection.append(")");
+                        }
+                    }
+                }
+            }
+
+            // Build query
+            String selectionStr = selection.length() > 0 ? selection.toString() : null;
+            String[] selectionArgsArray = selectionArgs.size() > 0
+                ? selectionArgs.toArray(new String[0])
+                : null;
+            String sortOrder = Calls.DATE + " DESC" + (limit > 0 ? " LIMIT " + limit : "");
+
+            // Execute query with try-with-resources pattern for automatic cursor cleanup
+            cursor = context.getContentResolver().query(
+                CallLog.Calls.CONTENT_URI,
+                null,
+                selectionStr,
+                selectionArgsArray,
+                sortOrder
+            );
 
             WritableArray result = Arguments.createArray();
 
             if (cursor == null) {
+                Log.w(TAG, "Call log query returned null cursor");
                 promise.resolve(result);
                 return;
             }
 
-            boolean nullFilter = filter == null;
-            String minTimestamp = !nullFilter && filter.hasKey("minTimestamp") ? filter.getString("minTimestamp") : "0";
-            String maxTimestamp = !nullFilter && filter.hasKey("maxTimestamp") ? filter.getString("maxTimestamp") : "-1";
-
-            String types = !nullFilter && filter.hasKey("types") ? filter.getString("types") : "[]";
-            JSONArray typesArray= new JSONArray(types);
-            Set<String> typeSet = new HashSet<>(Arrays.asList(toStringArray(typesArray)));
-
-            String phoneNumbers = !nullFilter && filter.hasKey("phoneNumbers") ? filter.getString("phoneNumbers") : "[]";
-            JSONArray phoneNumbersArray= new JSONArray(phoneNumbers);
-            Set<String> phoneNumberSet = new HashSet<>(Arrays.asList(toStringArray(phoneNumbersArray)));
-
-            int callLogCount = 0;
-
-            final int NUMBER_COLUMN_INDEX = cursor.getColumnIndex(Calls.NUMBER);
-            final int TYPE_COLUMN_INDEX = cursor.getColumnIndex(Calls.TYPE);
-            final int DATE_COLUMN_INDEX = cursor.getColumnIndex(Calls.DATE);
-            final int DURATION_COLUMN_INDEX = cursor.getColumnIndex(Calls.DURATION);
-            final int NAME_COLUMN_INDEX = cursor.getColumnIndex(Calls.CACHED_NAME);
-            final int PHONE_ACCOUNT_ID_COLUMN_INDEX = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP 
+            // Get column indices
+            final int numberIndex = cursor.getColumnIndex(Calls.NUMBER);
+            final int typeIndex = cursor.getColumnIndex(Calls.TYPE);
+            final int dateIndex = cursor.getColumnIndex(Calls.DATE);
+            final int durationIndex = cursor.getColumnIndex(Calls.DURATION);
+            final int nameIndex = cursor.getColumnIndex(Calls.CACHED_NAME);
+            final int phoneAccountIdIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
                 ? cursor.getColumnIndex(Calls.PHONE_ACCOUNT_ID) : -1;
 
-            boolean minTimestampDefined = minTimestamp != null && !minTimestamp.equals("0");
-            boolean minTimestampReached = false;
-
-            while (cursor.moveToNext() && this.shouldContinue(limit, callLogCount) && !minTimestampReached) {
-                String phoneNumber = cursor.getString(NUMBER_COLUMN_INDEX);
-                int duration = cursor.getInt(DURATION_COLUMN_INDEX);
-                String name = cursor.getString(NAME_COLUMN_INDEX);
-                String phoneAccountId = (PHONE_ACCOUNT_ID_COLUMN_INDEX != -1) 
-                    ? cursor.getString(PHONE_ACCOUNT_ID_COLUMN_INDEX) : null;
-
-                String timestampStr = cursor.getString(DATE_COLUMN_INDEX);
-                minTimestampReached = minTimestampDefined && Long.parseLong(timestampStr) <= Long.parseLong(minTimestamp);
-
-                DateFormat df = SimpleDateFormat.getDateTimeInstance(SimpleDateFormat.MEDIUM, SimpleDateFormat.MEDIUM);
-                //DateFormat df = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-                String dateTime = df.format(new Date(Long.valueOf(timestampStr)));
-
-                String type = this.resolveCallType(cursor.getInt(TYPE_COLUMN_INDEX));
-
-                boolean passesPhoneFilter = phoneNumberSet == null || phoneNumberSet.isEmpty() || phoneNumberSet.contains(phoneNumber);
-                boolean passesTypeFilter = typeSet == null || typeSet.isEmpty() || typeSet.contains(type);
-                boolean passesMinTimestampFilter = minTimestamp == null || minTimestamp.equals("0") || Long.parseLong(timestampStr) >= Long.parseLong(minTimestamp);
-                boolean passesMaxTimestampFilter = maxTimestamp == null || maxTimestamp.equals("-1") || Long.parseLong(timestampStr) <= Long.parseLong(maxTimestamp);
-                boolean passesFilter = passesPhoneFilter && passesTypeFilter && passesMinTimestampFilter && passesMaxTimestampFilter;
-
-                if (passesFilter) {
+            // Process cursor results
+            while (cursor.moveToNext()) {
+                try {
                     WritableMap callLog = Arguments.createMap();
-                    callLog.putString("phoneNumber", phoneNumber);
+
+                    // Basic call information
+                    String phoneNumber = numberIndex != -1 ? cursor.getString(numberIndex) : null;
+                    int duration = durationIndex != -1 ? cursor.getInt(durationIndex) : 0;
+                    String name = nameIndex != -1 ? cursor.getString(nameIndex) : null;
+                    String timestampStr = dateIndex != -1 ? cursor.getString(dateIndex) : "0";
+                    int rawType = typeIndex != -1 ? cursor.getInt(typeIndex) : Calls.INCOMING_TYPE;
+
+                    // Format date/time
+                    DateFormat df = SimpleDateFormat.getDateTimeInstance(SimpleDateFormat.MEDIUM, SimpleDateFormat.MEDIUM);
+                    String dateTime = df.format(new Date(Long.parseLong(timestampStr)));
+
+                    // Resolve call type
+                    String type = resolveCallType(rawType);
+
+                    // Get phone account ID and SIM slot info
+                    String phoneAccountId = null;
+                    Integer simSlot = null;
+
+                    if (phoneAccountIdIndex != -1) {
+                        phoneAccountId = cursor.getString(phoneAccountIdIndex);
+                        simSlot = getSimSlotIndex(phoneAccountId);
+                    }
+
+                    // Build result object
+                    callLog.putString("phoneNumber", phoneNumber != null ? phoneNumber : "");
                     callLog.putInt("duration", duration);
-                    callLog.putString("name", name);
+                    callLog.putString("name", name != null ? name : "");
                     callLog.putString("timestamp", timestampStr);
                     callLog.putString("dateTime", dateTime);
                     callLog.putString("type", type);
-                    callLog.putInt("rawType", cursor.getInt(TYPE_COLUMN_INDEX));
+                    callLog.putInt("rawType", rawType);
+
                     if (phoneAccountId != null) {
                         callLog.putString("phoneAccountId", phoneAccountId);
                     } else {
                         callLog.putNull("phoneAccountId");
                     }
+
+                    if (simSlot != null) {
+                        callLog.putInt("simSlot", simSlot);
+                    } else {
+                        callLog.putNull("simSlot");
+                    }
+
                     result.pushMap(callLog);
-                    callLogCount++;
+                } catch (Exception e) {
+                    Log.e(TAG, "Error processing call log entry: " + e.getMessage());
+                    // Continue processing other entries
                 }
             }
 
-            cursor.close();
-
             promise.resolve(result);
+
         } catch (JSONException e) {
-            promise.reject(e);
+            Log.e(TAG, "JSON parsing error in loadWithFilter: " + e.getMessage());
+            promise.reject("JSON_PARSE_ERROR", "Failed to parse filter parameters", e);
+        } catch (SecurityException e) {
+            Log.e(TAG, "Permission denied when accessing call log: " + e.getMessage());
+            promise.reject("PERMISSION_DENIED", "READ_CALL_LOG permission is required", e);
+        } catch (Exception e) {
+            Log.e(TAG, "Unexpected error in loadWithFilter: " + e.getMessage());
+            promise.reject("CALL_LOG_ERROR", "Failed to load call logs: " + e.getMessage(), e);
+        } finally {
+            // Ensure cursor is always closed
+            if (cursor != null) {
+                try {
+                    cursor.close();
+                } catch (Exception e) {
+                    Log.e(TAG, "Error closing cursor: " + e.getMessage());
+                }
+            }
         }
     }
 
-    public static String[] toStringArray(JSONArray array) {
-        if(array==null)
+    /**
+     * Get SIM slot index from phone account ID
+     * Returns null if unable to determine or not available
+     * Supports various device manufacturer formats
+     */
+    @Nullable
+    private Integer getSimSlotIndex(@Nullable String phoneAccountId) {
+        if (phoneAccountId == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
             return null;
-
-        String[] arr=new String[array.length()];
-        for(int i=0; i<arr.length; i++) {
-            arr[i]=array.optString(i);
         }
-        return arr;
+
+        try {
+            TelecomManager telecomManager = (TelecomManager) context.getSystemService(Context.TELECOM_SERVICE);
+            if (telecomManager == null) {
+                return null;
+            }
+
+            // Method 1: Match against TelecomManager's call capable phone accounts (Android 6.0+)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try {
+                    List<PhoneAccountHandle> phoneAccounts = telecomManager.getCallCapablePhoneAccounts();
+                    if (phoneAccounts != null && !phoneAccounts.isEmpty()) {
+                        for (int i = 0; i < phoneAccounts.size(); i++) {
+                            PhoneAccountHandle handle = phoneAccounts.get(i);
+                            if (handle != null && handle.getId() != null && handle.getId().equals(phoneAccountId)) {
+                                // Return 1-based slot number (SIM 1, SIM 2, etc.)
+                                Log.d(TAG, "SIM slot detected via TelecomManager: " + (i + 1) + " for accountId: " + phoneAccountId);
+                                return i + 1;
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Could not get phone accounts from TelecomManager: " + e.getMessage());
+                }
+            }
+
+            // Method 2: Parse phoneAccountId string directly
+            // Common formats across manufacturers:
+            // - Simple numeric: "0", "1", "2"
+            // - Samsung: "0", "1"
+            // - Xiaomi: "slot0", "slot1"
+            // - Huawei: "1", "2"
+            // - OnePlus: "0", "1"
+            // - Generic: "sim_0", "sim_1", "89XXXXXX" (ICCID)
+
+            String lowerCaseId = phoneAccountId.toLowerCase();
+
+            // Handle simple single digit cases (most common)
+            if (phoneAccountId.matches("^[0-9]$")) {
+                int slot = Integer.parseInt(phoneAccountId);
+                Log.d(TAG, "SIM slot detected via simple numeric: " + (slot + 1) + " for accountId: " + phoneAccountId);
+                // Convert 0-based to 1-based
+                return slot + 1;
+            }
+
+            // Handle "slot0", "slot1", etc.
+            if (lowerCaseId.startsWith("slot") && lowerCaseId.length() > 4) {
+                try {
+                    String slotNum = lowerCaseId.substring(4, 5);
+                    int slot = Integer.parseInt(slotNum);
+                    Log.d(TAG, "SIM slot detected via 'slot' prefix: " + (slot + 1) + " for accountId: " + phoneAccountId);
+                    return slot + 1;
+                } catch (NumberFormatException e) {
+                    // Continue to next method
+                }
+            }
+
+            // Handle "sim_0", "sim_1", etc.
+            if (lowerCaseId.startsWith("sim") && lowerCaseId.contains("_")) {
+                try {
+                    String[] parts = lowerCaseId.split("_");
+                    if (parts.length > 1) {
+                        int slot = Integer.parseInt(parts[1]);
+                        Log.d(TAG, "SIM slot detected via 'sim_' prefix: " + (slot + 1) + " for accountId: " + phoneAccountId);
+                        return slot + 1;
+                    }
+                } catch (NumberFormatException e) {
+                    // Continue to next method
+                }
+            }
+
+            // Handle cases with multiple digits - extract last single digit
+            if (phoneAccountId.matches(".*[0-9].*")) {
+                try {
+                    // Extract all digits
+                    String digits = phoneAccountId.replaceAll("[^0-9]", "");
+                    if (!digits.isEmpty()) {
+                        // Use last digit as it's often the slot indicator
+                        int lastDigit = Integer.parseInt(digits.substring(digits.length() - 1));
+                        // Only return if it looks like a reasonable slot number (0-3)
+                        if (lastDigit >= 0 && lastDigit <= 3) {
+                            Log.d(TAG, "SIM slot detected via digit extraction: " + (lastDigit + 1) + " for accountId: " + phoneAccountId);
+                            return lastDigit + 1;
+                        }
+                    }
+                } catch (NumberFormatException e) {
+                    Log.d(TAG, "Could not parse slot number from phoneAccountId: " + phoneAccountId);
+                }
+            }
+
+            Log.d(TAG, "Could not determine SIM slot from phoneAccountId: " + phoneAccountId);
+        } catch (SecurityException e) {
+            Log.w(TAG, "SecurityException when accessing TelecomManager: " + e.getMessage());
+        } catch (Exception e) {
+            Log.e(TAG, "Error getting SIM slot index: " + e.getMessage(), e);
+        }
+
+        return null;
     }
 
+    /**
+     * Convert call type string to integer code
+     */
+    private int resolveCallTypeCode(String callType) {
+        if (callType == null) {
+            return -1;
+        }
+
+        switch (callType.toUpperCase()) {
+            case "OUTGOING":
+                return Calls.OUTGOING_TYPE;
+            case "INCOMING":
+                return Calls.INCOMING_TYPE;
+            case "MISSED":
+                return Calls.MISSED_TYPE;
+            case "VOICEMAIL":
+                return Calls.VOICEMAIL_TYPE;
+            case "REJECTED":
+                return Calls.REJECTED_TYPE;
+            case "BLOCKED":
+                return Calls.BLOCKED_TYPE;
+            case "ANSWERED_EXTERNALLY":
+                return Calls.ANSWERED_EXTERNALLY_TYPE;
+            default:
+                return -1;
+        }
+    }
+
+    /**
+     * Convert call type integer code to string
+     */
     private String resolveCallType(int callTypeCode) {
         switch (callTypeCode) {
             case Calls.OUTGOING_TYPE:
@@ -168,10 +433,6 @@ public class CallLogModule extends ReactContextBaseJavaModule {
             default:
                 return "UNKNOWN";
         }
-    }
-
-    private boolean shouldContinue(int limit, int count) {
-        return limit < 0 || count < limit;
     }
 }
 

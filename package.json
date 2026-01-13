@@ -20,5 +20,17 @@
     "package"
   ],
   "author": "wscodelabs",
-  "license": "ISC"
+  "license": "ISC",
+  "codegenConfig": {
+    "name": "RNCCallLogsSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.wscodelabs.callLogs"
+    }
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  }
 }

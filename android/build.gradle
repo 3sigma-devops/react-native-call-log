@@ -5,7 +5,7 @@ buildscript {
   }
 
   dependencies {
-    classpath 'com.android.tools.build:gradle:3.3.0'
+    classpath 'com.android.tools.build:gradle:7.4.2'
   }
 }
 
@@ -16,14 +16,21 @@ def safeExtGet(prop, fallback) {
 }
 
 android {
-  compileSdkVersion safeExtGet('compileSdkVersion', 28)
+  namespace 'com.wscodelabs.callLogs'
+  compileSdkVersion safeExtGet('compileSdkVersion', 35)
 
   defaultConfig {
     minSdkVersion safeExtGet('minSdkVersion', 16)
-    targetSdkVersion safeExtGet('targetSdkVersion', 28)
+    targetSdkVersion safeExtGet('targetSdkVersion', 35)
     versionCode 1
     versionName "1.0"
   }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_1_8
+    targetCompatibility JavaVersion.VERSION_1_8
+  }
+
   lintOptions {
     abortOnError false
   }
@@ -40,4 +47,5 @@ repositories {
 
 dependencies {
   compileOnly "com.facebook.react:react-native:${safeExtGet('reactNativeVersion', '+')}"
+  implementation "androidx.core:core:1.12.0"
 }
