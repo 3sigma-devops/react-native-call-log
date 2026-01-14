@@ -4,9 +4,13 @@ import android.Manifest;
 import android.content.pm.PackageManager;
 import android.provider.CallLog;
 import android.provider.CallLog.Calls;
+import android.database.ContentObserver;
 import android.database.Cursor;
 import android.content.Context;
+import android.net.Uri;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.telecom.PhoneAccountHandle;
 import android.telecom.TelecomManager;
 import android.util.Log;
@@ -26,6 +30,7 @@ import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.modules.core.DeviceEventManagerModule;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -35,11 +40,20 @@ import javax.annotation.Nullable;
 public class CallLogModule extends ReactContextBaseJavaModule {
 
     private static final String TAG = "CallLogModule";
+    private static final String EVENT_CALL_LOG_CHANGE = "onCallLogChange";
+
     private final Context context;
+    private final ReactApplicationContext reactContext;
+    private ContentObserver callLogObserver;
+    private long lastTimestamp = 0;
+    private boolean isObserving = false;
+    private Handler mainHandler;
 
     public CallLogModule(ReactApplicationContext reactContext) {
         super(reactContext);
         this.context = reactContext;
+        this.reactContext = reactContext;
+        this.mainHandler = new Handler(Looper.getMainLooper());
     }
 
     @Override
@@ -432,6 +446,225 @@ public class CallLogModule extends ReactContextBaseJavaModule {
                 return "ANSWERED_EXTERNALLY";
             default:
                 return "UNKNOWN";
+        }
+    }
+
+    // ==================== Call Log Observer Methods ====================
+
+    /**
+     * Send event to JavaScript
+     */
+    private void sendEvent(String eventName, WritableMap params) {
+        if (reactContext.hasActiveReactInstance()) {
+            reactContext
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                .emit(eventName, params);
+        }
+    }
+
+    /**
+     * Start observing call log changes
+     */
+    @ReactMethod
+    public void startObserver(Promise promise) {
+        try {
+            if (isObserving) {
+                promise.resolve(true);
+                return;
+            }
+
+            if (!hasCallLogPermission()) {
+                promise.reject("PERMISSION_DENIED", "READ_CALL_LOG permission is required");
+                return;
+            }
+
+            // Set initial timestamp to current time to only capture new calls
+            lastTimestamp = System.currentTimeMillis();
+
+            // Create ContentObserver
+            callLogObserver = new ContentObserver(mainHandler) {
+                @Override
+                public void onChange(boolean selfChange) {
+                    super.onChange(selfChange);
+                    queryNewCallLogs();
+                }
+
+                @Override
+                public void onChange(boolean selfChange, Uri uri) {
+                    super.onChange(selfChange, uri);
+                    queryNewCallLogs();
+                }
+            };
+
+            // Register observer
+            context.getContentResolver().registerContentObserver(
+                CallLog.Calls.CONTENT_URI,
+                true,
+                callLogObserver
+            );
+
+            isObserving = true;
+            Log.d(TAG, "Call log observer started, tracking from timestamp: " + lastTimestamp);
+            promise.resolve(true);
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error starting observer: " + e.getMessage());
+            promise.reject("OBSERVER_ERROR", "Failed to start call log observer: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Stop observing call log changes
+     */
+    @ReactMethod
+    public void stopObserver(Promise promise) {
+        try {
+            if (callLogObserver != null) {
+                context.getContentResolver().unregisterContentObserver(callLogObserver);
+                callLogObserver = null;
+            }
+            isObserving = false;
+            Log.d(TAG, "Call log observer stopped");
+            promise.resolve(true);
+        } catch (Exception e) {
+            Log.e(TAG, "Error stopping observer: " + e.getMessage());
+            promise.reject("OBSERVER_ERROR", "Failed to stop call log observer: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Check if currently observing
+     */
+    @ReactMethod
+    public void isObserving(Promise promise) {
+        promise.resolve(isObserving);
+    }
+
+    /**
+     * Required for NativeEventEmitter
+     */
+    @ReactMethod
+    public void addListener(String eventName) {
+        // Keep: Required for RN event emitter
+    }
+
+    /**
+     * Required for NativeEventEmitter
+     */
+    @ReactMethod
+    public void removeListeners(Integer count) {
+        // Keep: Required for RN event emitter
+    }
+
+    /**
+     * Query for new call logs since last check and emit events
+     */
+    private void queryNewCallLogs() {
+        if (!hasCallLogPermission()) {
+            Log.w(TAG, "No permission to query call logs");
+            return;
+        }
+
+        Cursor cursor = null;
+        try {
+            // Query for calls newer than lastTimestamp
+            String selection = Calls.DATE + " > ?";
+            String[] selectionArgs = new String[]{String.valueOf(lastTimestamp)};
+            String sortOrder = Calls.DATE + " ASC";
+
+            cursor = context.getContentResolver().query(
+                CallLog.Calls.CONTENT_URI,
+                null,
+                selection,
+                selectionArgs,
+                sortOrder
+            );
+
+            if (cursor == null || cursor.getCount() == 0) {
+                return;
+            }
+
+            // Get column indices
+            final int numberIndex = cursor.getColumnIndex(Calls.NUMBER);
+            final int typeIndex = cursor.getColumnIndex(Calls.TYPE);
+            final int dateIndex = cursor.getColumnIndex(Calls.DATE);
+            final int durationIndex = cursor.getColumnIndex(Calls.DURATION);
+            final int nameIndex = cursor.getColumnIndex(Calls.CACHED_NAME);
+            final int phoneAccountIdIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+                ? cursor.getColumnIndex(Calls.PHONE_ACCOUNT_ID) : -1;
+
+            long newestTimestamp = lastTimestamp;
+
+            while (cursor.moveToNext()) {
+                try {
+                    WritableMap callLog = Arguments.createMap();
+
+                    String phoneNumber = numberIndex != -1 ? cursor.getString(numberIndex) : null;
+                    int duration = durationIndex != -1 ? cursor.getInt(durationIndex) : 0;
+                    String name = nameIndex != -1 ? cursor.getString(nameIndex) : null;
+                    String timestampStr = dateIndex != -1 ? cursor.getString(dateIndex) : "0";
+                    int rawType = typeIndex != -1 ? cursor.getInt(typeIndex) : Calls.INCOMING_TYPE;
+
+                    long entryTimestamp = Long.parseLong(timestampStr);
+                    if (entryTimestamp > newestTimestamp) {
+                        newestTimestamp = entryTimestamp;
+                    }
+
+                    DateFormat df = SimpleDateFormat.getDateTimeInstance(SimpleDateFormat.MEDIUM, SimpleDateFormat.MEDIUM);
+                    String dateTime = df.format(new Date(entryTimestamp));
+
+                    String type = resolveCallType(rawType);
+
+                    String phoneAccountId = null;
+                    Integer simSlot = null;
+
+                    if (phoneAccountIdIndex != -1) {
+                        phoneAccountId = cursor.getString(phoneAccountIdIndex);
+                        simSlot = getSimSlotIndex(phoneAccountId);
+                    }
+
+                    callLog.putString("phoneNumber", phoneNumber != null ? phoneNumber : "");
+                    callLog.putInt("duration", duration);
+                    callLog.putString("name", name != null ? name : "");
+                    callLog.putString("timestamp", timestampStr);
+                    callLog.putString("dateTime", dateTime);
+                    callLog.putString("type", type);
+                    callLog.putInt("rawType", rawType);
+
+                    if (phoneAccountId != null) {
+                        callLog.putString("phoneAccountId", phoneAccountId);
+                    } else {
+                        callLog.putNull("phoneAccountId");
+                    }
+
+                    if (simSlot != null) {
+                        callLog.putInt("simSlot", simSlot);
+                    } else {
+                        callLog.putNull("simSlot");
+                    }
+
+                    // Emit event for this call log entry
+                    Log.d(TAG, "New call log detected: " + phoneNumber + " type: " + type);
+                    sendEvent(EVENT_CALL_LOG_CHANGE, callLog);
+
+                } catch (Exception e) {
+                    Log.e(TAG, "Error processing new call log entry: " + e.getMessage());
+                }
+            }
+
+            // Update lastTimestamp to newest entry
+            lastTimestamp = newestTimestamp;
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error querying new call logs: " + e.getMessage());
+        } finally {
+            if (cursor != null) {
+                try {
+                    cursor.close();
+                } catch (Exception e) {
+                    Log.e(TAG, "Error closing cursor: " + e.getMessage());
+                }
+            }
         }
     }
 }

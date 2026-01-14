@@ -1,4 +1,4 @@
-import { NativeModules, Platform } from 'react-native';
+import { NativeModules, NativeEventEmitter, Platform } from 'react-native';
 
 // Try to use TurboModule (New Architecture) first, fallback to NativeModules (Old Architecture)
 let NativeCallLogs;
@@ -15,6 +15,9 @@ if (!NativeCallLogs) {
     'CallLogs: Native module not found. Make sure react-native-call-log is properly installed and linked.'
   );
 }
+
+// Create event emitter for call log change events
+const eventEmitter = Platform.OS === 'android' ? new NativeEventEmitter(NativeCallLogs) : null;
 
 class CallLogs {
   /**
@@ -96,6 +99,69 @@ class CallLogs {
    */
   static isAvailable() {
     return Platform.OS === 'android' && !!NativeCallLogs;
+  }
+
+  /**
+   * Start observing call log changes
+   * Events will be emitted via NativeEventEmitter when new calls are logged
+   * @returns {Promise<boolean>} True if observer started successfully
+   */
+  static async startObserver() {
+    if (Platform.OS !== 'android') {
+      throw new Error('CallLogs.startObserver is only available on Android');
+    }
+    try {
+      return await NativeCallLogs.startObserver();
+    } catch (error) {
+      if (error.code === 'PERMISSION_DENIED') {
+        throw new Error(
+          'CallLogs: READ_CALL_LOG permission is required. Please request this permission before starting observer.'
+        );
+      }
+      console.error('CallLogs.startObserver error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Stop observing call log changes
+   * @returns {Promise<boolean>} True if observer stopped successfully
+   */
+  static async stopObserver() {
+    if (Platform.OS !== 'android') {
+      throw new Error('CallLogs.stopObserver is only available on Android');
+    }
+    try {
+      return await NativeCallLogs.stopObserver();
+    } catch (error) {
+      console.error('CallLogs.stopObserver error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Check if currently observing call log changes
+   * @returns {Promise<boolean>} True if observer is active
+   */
+  static async isObserving() {
+    if (Platform.OS !== 'android') {
+      return false;
+    }
+    try {
+      return await NativeCallLogs.isObserving();
+    } catch (error) {
+      console.error('CallLogs.isObserving error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get the event emitter for subscribing to call log changes
+   * Use: CallLogs.getEventEmitter().addListener('onCallLogChange', callback)
+   * @returns {NativeEventEmitter|null} Event emitter instance (null on non-Android)
+   */
+  static getEventEmitter() {
+    return eventEmitter;
   }
 }
 
