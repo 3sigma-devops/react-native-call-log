@@ -10,6 +10,7 @@ import android.content.Context;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.telecom.PhoneAccountHandle;
 import android.telecom.TelecomManager;
@@ -47,13 +48,13 @@ public class CallLogModule extends ReactContextBaseJavaModule {
     private ContentObserver callLogObserver;
     private long lastTimestamp = 0;
     private boolean isObserving = false;
-    private Handler mainHandler;
+    private HandlerThread observerThread;
+    private Handler observerHandler;
 
     public CallLogModule(ReactApplicationContext reactContext) {
         super(reactContext);
         this.context = reactContext;
         this.reactContext = reactContext;
-        this.mainHandler = new Handler(Looper.getMainLooper());
     }
 
     @Override
@@ -481,8 +482,13 @@ public class CallLogModule extends ReactContextBaseJavaModule {
             // Set initial timestamp to current time to only capture new calls
             lastTimestamp = System.currentTimeMillis();
 
+            // Create worker thread for background processing
+            observerThread = new HandlerThread("CallLogObserver");
+            observerThread.start();
+            observerHandler = new Handler(observerThread.getLooper());
+
             // Create ContentObserver
-            callLogObserver = new ContentObserver(mainHandler) {
+            callLogObserver = new ContentObserver(observerHandler) {
                 @Override
                 public void onChange(boolean selfChange) {
                     super.onChange(selfChange);
@@ -522,6 +528,11 @@ public class CallLogModule extends ReactContextBaseJavaModule {
             if (callLogObserver != null) {
                 context.getContentResolver().unregisterContentObserver(callLogObserver);
                 callLogObserver = null;
+            }
+            if (observerThread != null) {
+                observerThread.quit();
+                observerThread = null;
+                observerHandler = null;
             }
             isObserving = false;
             Log.d(TAG, "Call log observer stopped");
@@ -668,4 +679,3 @@ public class CallLogModule extends ReactContextBaseJavaModule {
         }
     }
 }
-

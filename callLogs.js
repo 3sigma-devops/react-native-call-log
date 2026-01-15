@@ -10,7 +10,7 @@ try {
   NativeCallLogs = NativeModules.CallLogs;
 }
 
-if (!NativeCallLogs) {
+if (Platform.OS === 'android' && !NativeCallLogs) {
   throw new Error(
     'CallLogs: Native module not found. Make sure react-native-call-log is properly installed and linked.'
   );
