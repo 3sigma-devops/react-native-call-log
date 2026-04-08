@@ -14,6 +14,8 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.telecom.PhoneAccountHandle;
 import android.telecom.TelecomManager;
+import android.telephony.SubscriptionInfo;
+import android.telephony.SubscriptionManager;
 import android.util.Log;
 import androidx.core.content.ContextCompat;
 
@@ -208,6 +210,16 @@ public class CallLogModule extends ReactContextBaseJavaModule {
             final int nameIndex = cursor.getColumnIndex(Calls.CACHED_NAME);
             final int phoneAccountIdIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
                 ? cursor.getColumnIndex(Calls.PHONE_ACCOUNT_ID) : -1;
+            final int phoneAccountComponentIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+                ? cursor.getColumnIndex(Calls.PHONE_ACCOUNT_COMPONENT_NAME) : -1;
+            final int numberPresentationIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+                ? cursor.getColumnIndex(Calls.NUMBER_PRESENTATION) : -1;
+            final int isReadIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+                ? cursor.getColumnIndex(Calls.IS_READ) : -1;
+            // "reason" = disconnect cause — not a named constant but always present in the DB
+            final int disconnectCauseIndex = cursor.getColumnIndex("reason");
+            final int callScreeningIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                ? cursor.getColumnIndex(Calls.CALL_SCREENING_COMPONENT_NAME) : -1;
 
             // Process cursor results
             while (cursor.moveToNext()) {
@@ -228,13 +240,22 @@ public class CallLogModule extends ReactContextBaseJavaModule {
                     // Resolve call type
                     String type = resolveCallType(rawType);
 
-                    // Get phone account ID and SIM slot info
+                    // Accuracy signals
+                    int disconnectCause = disconnectCauseIndex != -1 ? cursor.getInt(disconnectCauseIndex) : -1;
+                    int numberPresentation = numberPresentationIndex != -1 ? cursor.getInt(numberPresentationIndex) : -1;
+                    int isRead = isReadIndex != -1 ? cursor.getInt(isReadIndex) : -1;
+                    String phoneAccountComponentName = phoneAccountComponentIndex != -1 ? cursor.getString(phoneAccountComponentIndex) : null;
+                    String callScreeningComponent = callScreeningIndex != -1 ? cursor.getString(callScreeningIndex) : null;
+
+                    // Get phone account ID, SIM slot and SIM display name
                     String phoneAccountId = null;
                     Integer simSlot = null;
+                    String simDisplayName = null;
 
                     if (phoneAccountIdIndex != -1) {
                         phoneAccountId = cursor.getString(phoneAccountIdIndex);
                         simSlot = getSimSlotIndex(phoneAccountId);
+                        simDisplayName = getSimDisplayName(phoneAccountId);
                     }
 
                     // Build result object
@@ -245,6 +266,11 @@ public class CallLogModule extends ReactContextBaseJavaModule {
                     callLog.putString("dateTime", dateTime);
                     callLog.putString("type", type);
                     callLog.putInt("rawType", rawType);
+                    callLog.putInt("disconnectCause", disconnectCause);
+                    callLog.putString("disconnectCauseLabel", resolveDisconnectCause(disconnectCause));
+                    callLog.putInt("numberPresentation", numberPresentation);
+                    callLog.putString("numberPresentationLabel", resolveNumberPresentation(numberPresentation));
+                    callLog.putInt("isRead", isRead);
 
                     if (phoneAccountId != null) {
                         callLog.putString("phoneAccountId", phoneAccountId);
@@ -252,10 +278,28 @@ public class CallLogModule extends ReactContextBaseJavaModule {
                         callLog.putNull("phoneAccountId");
                     }
 
+                    if (phoneAccountComponentName != null) {
+                        callLog.putString("phoneAccountComponentName", phoneAccountComponentName);
+                    } else {
+                        callLog.putNull("phoneAccountComponentName");
+                    }
+
+                    if (callScreeningComponent != null) {
+                        callLog.putString("callScreeningComponentName", callScreeningComponent);
+                    } else {
+                        callLog.putNull("callScreeningComponentName");
+                    }
+
                     if (simSlot != null) {
                         callLog.putInt("simSlot", simSlot);
                     } else {
                         callLog.putNull("simSlot");
+                    }
+
+                    if (simDisplayName != null) {
+                        callLog.putString("simDisplayName", simDisplayName);
+                    } else {
+                        callLog.putNull("simDisplayName");
                     }
 
                     result.pushMap(callLog);
@@ -399,6 +443,43 @@ public class CallLogModule extends ReactContextBaseJavaModule {
     }
 
     /**
+     * Get SIM display name from phone account ID using SubscriptionManager.
+     * Matches phone account handles to subscription info by index (same approach as aathapa v3.0.0).
+     * Requires READ_PHONE_STATE permission. Returns null if unavailable.
+     */
+    @Nullable
+    private String getSimDisplayName(@Nullable String phoneAccountId) {
+        if (phoneAccountId == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return null;
+        }
+        try {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE)
+                    != PackageManager.PERMISSION_GRANTED) {
+                return null;
+            }
+            TelecomManager telecomManager = (TelecomManager) context.getSystemService(Context.TELECOM_SERVICE);
+            SubscriptionManager subscriptionManager = (SubscriptionManager) context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
+            if (telecomManager == null || subscriptionManager == null) return null;
+
+            List<PhoneAccountHandle> accounts = telecomManager.getCallCapablePhoneAccounts();
+            List<SubscriptionInfo> subscriptions = subscriptionManager.getActiveSubscriptionInfoList();
+            if (accounts == null || subscriptions == null) return null;
+
+            for (int i = 0; i < accounts.size(); i++) {
+                if (i >= subscriptions.size()) break;
+                PhoneAccountHandle handle = accounts.get(i);
+                if (handle != null && phoneAccountId.equals(handle.getId())) {
+                    CharSequence name = subscriptions.get(i).getDisplayName();
+                    return name != null ? name.toString() : null;
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not get SIM display name: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
      * Convert call type string to integer code
      */
     private int resolveCallTypeCode(String callType) {
@@ -447,6 +528,42 @@ public class CallLogModule extends ReactContextBaseJavaModule {
                 return "ANSWERED_EXTERNALLY";
             default:
                 return "UNKNOWN";
+        }
+    }
+
+    /**
+     * Resolve disconnect cause integer to human-readable label.
+     * Values from android.telecom.DisconnectCause — LOCAL/REMOTE = answered.
+     */
+    private String resolveDisconnectCause(int cause) {
+        switch (cause) {
+            case 1:  return "ERROR";
+            case 2:  return "LOCAL";              // user hung up — definitively answered
+            case 3:  return "REMOTE";             // other side hung up — definitively answered
+            case 4:  return "REJECTED";           // declined by user
+            case 5:  return "MISSED";             // not answered in time
+            case 6:  return "CANCELED";           // caller hung up before answer
+            case 7:  return "BUSY";               // line busy
+            case 8:  return "CALL_PULLED";
+            case 9:  return "ANSWERED_ELSEWHERE"; // answered on another device
+            case 10: return "CONNECTION_MANAGER_NOT_SUPPORTED";
+            case 11: return "RESTRICTED";
+            case 12: return "OTHER";
+            default: return "UNKNOWN";
+        }
+    }
+
+    /**
+     * Resolve number presentation integer to label.
+     * Useful for detecting private/hidden/spam numbers.
+     */
+    private String resolveNumberPresentation(int presentation) {
+        switch (presentation) {
+            case Calls.PRESENTATION_ALLOWED:    return "ALLOWED";
+            case Calls.PRESENTATION_RESTRICTED: return "RESTRICTED"; // private/hidden number
+            case Calls.PRESENTATION_UNKNOWN:    return "UNKNOWN";
+            case Calls.PRESENTATION_PAYPHONE:   return "PAYPHONE";
+            default: return "UNKNOWN";
         }
     }
 
@@ -603,6 +720,15 @@ public class CallLogModule extends ReactContextBaseJavaModule {
             final int nameIndex = cursor.getColumnIndex(Calls.CACHED_NAME);
             final int phoneAccountIdIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
                 ? cursor.getColumnIndex(Calls.PHONE_ACCOUNT_ID) : -1;
+            final int phoneAccountComponentIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+                ? cursor.getColumnIndex(Calls.PHONE_ACCOUNT_COMPONENT_NAME) : -1;
+            final int numberPresentationIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+                ? cursor.getColumnIndex(Calls.NUMBER_PRESENTATION) : -1;
+            final int isReadIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+                ? cursor.getColumnIndex(Calls.IS_READ) : -1;
+            final int disconnectCauseIndex = cursor.getColumnIndex("reason");
+            final int callScreeningIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                ? cursor.getColumnIndex(Calls.CALL_SCREENING_COMPONENT_NAME) : -1;
 
             long newestTimestamp = lastTimestamp;
 
@@ -626,12 +752,20 @@ public class CallLogModule extends ReactContextBaseJavaModule {
 
                     String type = resolveCallType(rawType);
 
+                    int disconnectCause = disconnectCauseIndex != -1 ? cursor.getInt(disconnectCauseIndex) : -1;
+                    int numberPresentation = numberPresentationIndex != -1 ? cursor.getInt(numberPresentationIndex) : -1;
+                    int isRead = isReadIndex != -1 ? cursor.getInt(isReadIndex) : -1;
+                    String phoneAccountComponentName = phoneAccountComponentIndex != -1 ? cursor.getString(phoneAccountComponentIndex) : null;
+                    String callScreeningComponent = callScreeningIndex != -1 ? cursor.getString(callScreeningIndex) : null;
+
                     String phoneAccountId = null;
                     Integer simSlot = null;
+                    String simDisplayName = null;
 
                     if (phoneAccountIdIndex != -1) {
                         phoneAccountId = cursor.getString(phoneAccountIdIndex);
                         simSlot = getSimSlotIndex(phoneAccountId);
+                        simDisplayName = getSimDisplayName(phoneAccountId);
                     }
 
                     callLog.putString("phoneNumber", phoneNumber != null ? phoneNumber : "");
@@ -641,6 +775,11 @@ public class CallLogModule extends ReactContextBaseJavaModule {
                     callLog.putString("dateTime", dateTime);
                     callLog.putString("type", type);
                     callLog.putInt("rawType", rawType);
+                    callLog.putInt("disconnectCause", disconnectCause);
+                    callLog.putString("disconnectCauseLabel", resolveDisconnectCause(disconnectCause));
+                    callLog.putInt("numberPresentation", numberPresentation);
+                    callLog.putString("numberPresentationLabel", resolveNumberPresentation(numberPresentation));
+                    callLog.putInt("isRead", isRead);
 
                     if (phoneAccountId != null) {
                         callLog.putString("phoneAccountId", phoneAccountId);
@@ -648,10 +787,28 @@ public class CallLogModule extends ReactContextBaseJavaModule {
                         callLog.putNull("phoneAccountId");
                     }
 
+                    if (phoneAccountComponentName != null) {
+                        callLog.putString("phoneAccountComponentName", phoneAccountComponentName);
+                    } else {
+                        callLog.putNull("phoneAccountComponentName");
+                    }
+
+                    if (callScreeningComponent != null) {
+                        callLog.putString("callScreeningComponentName", callScreeningComponent);
+                    } else {
+                        callLog.putNull("callScreeningComponentName");
+                    }
+
                     if (simSlot != null) {
                         callLog.putInt("simSlot", simSlot);
                     } else {
                         callLog.putNull("simSlot");
+                    }
+
+                    if (simDisplayName != null) {
+                        callLog.putString("simDisplayName", simDisplayName);
+                    } else {
+                        callLog.putNull("simDisplayName");
                     }
 
                     // Emit event for this call log entry
